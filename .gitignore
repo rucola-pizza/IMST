@@ -1,6 +1,11 @@
 dino/
 LOST/
+mae/
 TokenCut/
+ibot/
 .vscode/
 __pycache__/
 examples/
+ex2/
+model.pth
+ibot_ex.ipynb

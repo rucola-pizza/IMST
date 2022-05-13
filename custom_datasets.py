@@ -13,8 +13,8 @@ from PIL import Image
 from tqdm import tqdm
 from torchvision import transforms as pth_transforms
 
-transform = pth_transforms.Compose(
-    [
+transform = pth_transforms.Compose([
+      #pth_transforms.Resize([480,480]),
         pth_transforms.ToTensor(),
         pth_transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
     ]

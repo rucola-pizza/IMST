@@ -6,12 +6,14 @@ Todo:
     ** hook을 통해 얻은 feature 를 reshape, permute 해서 사용가능한 형태로 저장하는 함수 
 
 """
+from unittest.mock import NonCallableMagicMock
 from matplotlib import scale
 import torch 
 import torch.nn as nn 
 import torch.nn.functional as F 
 from PIL import Image
 import skimage.io
+import skimage 
 import numpy as np 
 import cv2
 import scipy
@@ -24,6 +26,42 @@ from LOST.object_discovery import lost
 
 import torchvision 
 import dino.vision_transformer as vits
+
+def crop(img):
+    pass
+
+
+def img_processing(img, patch_size, device):
+    """
+    데이터 로더에서 나온 이미지를 받아서 모델에 넣기위해서 padding하고 padding image, w_featmap, h_featmap을 반환 
+    Input
+        img : img from dataloader 
+        patch_size : 8 or 16
+        device 
+    Output:
+        padded image : patch 사이즈에 맞게 빈 부분을 0으로 패딩한 이미지 
+        w_featmap : 가로 patch 갯수 
+        h_featmap : 새로 patch 갯수 
+    """
+    #ceil = 
+    size_im = (
+            img.shape[0],
+            int(np.ceil(img.shape[1] / patch_size) * patch_size),
+            int(np.ceil(img.shape[2] / patch_size) * patch_size),
+        )
+    paded = torch.zeros(size_im)
+    paded[:, : img.shape[1], : img.shape[2]] = img
+    img = paded
+
+    # # Move to gpu
+    if device == torch.device('cuda'):
+        img = img.cuda(non_blocking=True)
+        # Size for transformers
+    w_featmap = img.shape[-2] // patch_size
+    h_featmap = img.shape[-1] // patch_size
+    
+    return img, w_featmap, h_featmap
+
 
 #load model from hub 
 #DINO만 가능, BEiT, iBOT, MAE 추가필요 
@@ -248,7 +286,7 @@ def lost_visualize(image, pred, A, scores, labeled_array , seed, scales, dims, p
     
     return image, corr, im_deg, labeled_array
 
-def tokencut_output(feats, dims, scales, init_image_size, tau = 0, eps = 1e-5, im_name='', no_binary_graph=False):
+def tokencut_output(feats, k, cls, dims, scales, init_image_size, pos_patch_idx = None, tau = 0, eps = 1e-5, im_name='', no_binary_graph=False, A=None):
 
     """
     Input: 
@@ -263,10 +301,31 @@ def tokencut_output(feats, dims, scales, init_image_size, tau = 0, eps = 1e-5, i
         im_name 
     """
     init_image_size = init_image_size[1:]
+    print(f"input cls shape : {cls.shape}")
+    cls = cls.squeeze(0)
     feats = feats.squeeze(0)
-    feats = F.normalize(feats, p=2)
-    A = (feats @ feats.transpose(1,0))
-    A = A.cpu().numpy()
+    print(f"cls shape : {cls.shape}")
+    print(f"feats shaep : {feats.shape}")
+    print(f"key shape : {k.shape}")
+    
+    sim = F.cosine_similarity(cls, k, dim=-1)
+    print(f"sim shape : {sim.shape}")
+    value = torch.sort(sim, descending=True)[0][0]
+    print(value.shape)
+    pos_value = value[torch.where(value > 0 )[0]]
+    mean_pos_value = torch.mean(pos_value)
+    max_len = len(torch.where(value > mean_pos_value)[0])
+    pos_patch_idx = list(torch.sort(sim, descending=True)[1][0, :max_len].cpu().numpy())
+    
+
+    if A is None:
+        feats = feats.squeeze(0)
+        print(f"Tokencut feats shape : {feats.shape}")
+        feats = F.normalize(feats, p=2)
+        A = (feats @ feats.transpose(1,0))
+        A = A.cpu().numpy()
+    else:
+        A = A
     if no_binary_graph:
         A[A<tau] = eps
     else:
@@ -292,66 +351,103 @@ def tokencut_output(feats, dims, scales, init_image_size, tau = 0, eps = 1e-5, i
     bipartition = bipartition.reshape(dims).astype(float)
 
     # predict BBox
-    pred, _, objects,cc = detect_box(bipartition, seed, dims, scales=scales, initial_im_size=init_image_size) ## We only extract the principal object BBox
+    pred, _, objects,cc = detect_box(bipartition, seed, dims, pos_patch_idx=pos_patch_idx, scales=scales, initial_im_size=init_image_size) ## We only extract the principal object BBox
     mask = np.zeros(dims)
     mask[cc[0],cc[1]] = 1
 
     return np.asarray(pred), objects, mask, seed, None, eigenvec.reshape(dims)
 
 #TokenCut detect box 
-def detect_box(bipartition, seed,  dims, initial_im_size=None, scales=None, principle_object=True):
+def detect_box(bipartition, seed, dims, initial_im_size=None, pos_patch_idx= None ,scales=None, principle_object=True):
     """
     Extract a box corresponding to the seed patch. Among connected components extract from the affinity matrix, select the one corresponding to the seed patch.
+    
+    pos_patch_idx : List 
+    
     """
-    w_featmap, h_featmap = dims
+    seeds = []
+    seeds.append(seed)
+    seeds = seeds + pos_patch_idx
+    pred_feats = []
+    preds = []
+    cc = []
     objects, num_objects = ndimage.label(bipartition) 
-    cc = objects[np.unravel_index(seed, dims)]
+
+    for i in range(len(seeds)):
+        x_, y_ = np.unravel_index(seeds[i], dims)
+        cc_ = objects[x_, y_]
+        if cc_ == 0:
+            pass 
+        else: 
+            cc.append(cc_)
+    cc = np.unique(cc)
     
 
     if principle_object:
-        mask = np.where(objects == cc)
+        for cc_ in cc:
+            mask = np.where(objects == cc_)
+            # 너무 작은 box 가 선택되면 스킵한다
+            if len(mask[0]) < 4:
+                continue  
+
        # Add +1 because excluded max
-        ymin, ymax = min(mask[0]), max(mask[0]) + 1
-        xmin, xmax = min(mask[1]), max(mask[1]) + 1
-        # Rescale to image size
-        r_xmin, r_xmax = scales[1] * xmin, scales[1] * xmax
-        r_ymin, r_ymax = scales[0] * ymin, scales[0] * ymax
-        pred = [r_xmin, r_ymin, r_xmax, r_ymax]
+            ymin, ymax = min(mask[0]), max(mask[0]) + 1
+            xmin, xmax = min(mask[1]), max(mask[1]) + 1
+            # Rescale to image size
+            r_xmin, r_xmax = scales[1] * xmin, scales[1] * xmax
+            r_ymin, r_ymax = scales[0] * ymin, scales[0] * ymax
+            pred = [r_xmin, r_ymin, r_xmax, r_ymax]
+            preds.append(pred)
          
-        # Check not out of image size (used when padding)
-        if initial_im_size:
-            pred[2] = min(pred[2], initial_im_size[1])
-            pred[3] = min(pred[3], initial_im_size[0])
+            # Check not out of image size (used when padding)
+            if initial_im_size:
+                pred[2] = min(pred[2], initial_im_size[1])
+                pred[3] = min(pred[3], initial_im_size[0])
         
         # Coordinate predictions for the feature space
         # Axis different then in image space
-        pred_feats = [ymin, xmin, ymax, xmax]
+            pred_feat = [ymin, xmin, ymax, xmax]
+            pred_feats.append(pred_feat)
 
-        return pred, pred_feats, objects, mask
+        return preds, pred_feats, objects, mask
     else:
         raise NotImplementedError
 
-def tokencut_visualize(img, eigvec, pred, labeled_array , dims, scales):
+def tokencut_visualize(img, eigvec, preds, labeled_array , dims, scales, seed, plot_seed=False):
     #second smallest eigvec 
     eigvec = scipy.ndimage.zoom(eigvec, scales, order=0, mode='nearest')
-
+    w_featmap, h_featmap = dims
     #image and pred
     image = np.copy(img)
     #plot the box 
-    cv2.rectangle(
+    print(preds)
+    for pred in preds:
+        cv2.rectangle(
         image,
         (int(pred[0]), int(pred[1])),
         (int(pred[2]), int(pred[3])),
         (255, 0, 0), 3,
-    )
+        )
+    if plot_seed:
+        print('plot seed')
+        s_ = np.unravel_index(seed, (w_featmap, h_featmap))
+        size_ = np.asarray(scales) /2
+        cv2.rectangle(
+            image,
+            (int(s_[1] * scales[1] - (size_[1] / 2)), int(s_[0] * scales[0] - (size_[0] / 2))),
+            (int(s_[1] * scales[1] + (size_[1] / 2)), int(s_[0] * scales[0] + (size_[0] / 2))),
+            (0, 255 ,0), -1, 
+        )
+ 
 
     return image, eigvec , labeled_array
 
 
 def lost_tokencut_visualize(img,
-                            eigvec, tokencut_pred, tokencut_labeled_array,
+                            eigvec, tokencut_pred, tokencut_labeled_array,tokencut_seed,
                             lost_pred, lost_sim_matrix, lost_labeled_array ,lost_scores, lost_seed,
-                            scales, dims, plot_seed = True):
+                            scales, dims, plot_seed = True,
+                            cmap='cividis'):
     lost_image_input = img.copy()
     tokencut_image_input = img.copy()
     
@@ -372,10 +468,12 @@ def lost_tokencut_visualize(img,
     tokencut_image, tokencut_eigvec, tokencut_labeled_array = tokencut_visualize(
         img=tokencut_image_input,
         eigvec=eigvec,
-        pred=tokencut_pred,
+        preds=tokencut_pred,
         labeled_array=tokencut_labeled_array,
         dims=dims,
-        scales=scales
+        scales=scales,
+        plot_seed=plot_seed,
+        seed=tokencut_seed
     )
     
     plt.subplot(231)
@@ -383,17 +481,17 @@ def lost_tokencut_visualize(img,
     plt.title("LOST")
 
     plt.subplot(232)
-    plt.imshow(lost_deg)
+    plt.imshow(lost_deg, cmap=cmap)
 
     plt.subplot(233)
     plt.imshow(lost_labeled_array, cmap='tab20')
     
     plt.subplot(234)
     plt.imshow(tokencut_image)
-    plt.title('TokenCut')
+    plt.title('Seong Taek Cut')
 
     plt.subplot(235)
-    plt.imshow(tokencut_eigvec)
+    plt.imshow(tokencut_eigvec, cmap=cmap)
     
     plt.subplot(236)
     plt.imshow(tokencut_labeled_array, cmap='tab20')
@@ -402,8 +500,12 @@ def lost_tokencut_visualize(img,
 
 
 def lost_tokencut(img_path, model, patch_size, feature, depth,
-                  tau = 0.2, no_binary_graph = False):
+                  tau = 0.2, no_binary_graph = False, A=None,plot_seed = False,
+                  cmap='cividis'):
     scikit_img = load_image(img_path=img_path)
+    # scikit_img = skimage.transform.resize(scikit_img,
+    #                                        (480,480),
+    #                                        )
     single_tensor_image = img_ImageDataset(img_path=img_path)
     init_img_size = single_tensor_image.shape
     scales = [patch_size, patch_size]
@@ -418,17 +520,20 @@ def lost_tokencut(img_path, model, patch_size, feature, depth,
     elif feature == 'v':
         feat = v_list[depth][:, 1:, :]
     elif feature == 'output':
-        feat = output_list[depth][:, 1: ,:]
+        feat = output_list[depth][:, : ,:]
     else:
         print('Wrong featrue, feature must be one of [k, q, v, output]')
     
-    tokencut_pred, tokencut_labeled_array, _, _, _, tokencut_eigvec = tokencut_output(
+    tokencut_pred, tokencut_labeled_array, _, tokencut_seed, _, tokencut_eigvec = tokencut_output(
         feats = feat,
+        cls=q_list[-1][: , 0 , :],
+        k = k_list[-1][: , 1: , ],
         dims=dims,
         scales=scales,
         init_image_size=init_img_size,
         tau = tau,
-        no_binary_graph=no_binary_graph
+        no_binary_graph=no_binary_graph,
+        A=A
     )
 
     lost_pred, lost_sim_matrix, lost_labeled_array, lost_scores, lost_seed = lost_output(
@@ -437,15 +542,50 @@ def lost_tokencut(img_path, model, patch_size, feature, depth,
         scales=scales,
         init_image_size=init_img_size
     )
+    #print("lost seed : {}".format(lost_seed))
+    #print("TokenCut seed : {}".format(tokencut_seed))
     lost_tokencut_visualize(img=scikit_img,
                             eigvec=tokencut_eigvec,
                             tokencut_pred=tokencut_pred,
                             tokencut_labeled_array=tokencut_labeled_array,
+                            tokencut_seed=tokencut_seed,
                             lost_pred = lost_pred,
                             lost_sim_matrix=lost_sim_matrix,
                             lost_labeled_array=lost_labeled_array,
                             lost_scores=lost_scores,
                             lost_seed=lost_seed,
                             scales=scales,
-                            dims = dims
+                            dims = dims,
+                            cmap=cmap,
+                            plot_seed=plot_seed
                             )
+    
+    return tokencut_labeled_array, lost_labeled_array, tokencut_pred
+    
+def cls_feature_sim_matrix(cls, feats, dims):
+    
+    w_featmap, h_featmap = dims
+    sim = (feats@cls.transpose(1,0)).squeeze()
+    sim_matrix = sim.reshape(w_featmap, h_featmap)
+    
+    if type(sim_matrix) == torch.Tensor:
+        if sim_matrix.device.type == 'cuda':
+            sim_matrix = sim_matrix.cpu().numpy()
+    
+    return sim_matrix
+
+def attention_visualize(img_path, model, patch_size):
+    """
+    Input:
+        input_image - from img_prop 
+    """
+    
+    img = ImageDataset(img_path = img_path)
+    input_image, w_featmap, h_featmap = img_prop(img=img, patch_size=patch_size)
+    
+    attn = model.get_last_selfattention(input_image.unsqueeze(0).to('cuda'))
+    nh = attn.shape[1]
+    attn = attn[0, : , 0 , 1:].reshape(nh, w_featmap, h_featmap)
+    
+    
+    
