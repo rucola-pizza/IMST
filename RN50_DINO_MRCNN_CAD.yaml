@@ -1,0 +1,41 @@
+MODEL:
+  META_ARCHITECTURE: "GeneralizedRCNN"
+  RPN:
+    PRE_NMS_TOPK_TEST: 6000
+    POST_NMS_TOPK_TEST: 1000
+  WEIGHTS: "/data_ssd/monet/resnet/dino_detectron.pkl"
+  MASK_ON: True
+  RESNETS:
+    DEPTH: 50
+    STRIDE_IN_1X1: False
+    NORM: "SyncBN"
+  ROI_HEADS:
+    NAME: "Res5ROIHeadsExtraNorm"
+    NUM_CLASSES: 1
+  BACKBONE:
+    FREEZE_AT: 2
+  ROI_BOX_HEAD:
+    NORM: "SyncBN" # RGB Mean and Std
+  PIXEL_MEAN: [123.675, 116.280, 103.530]
+  PIXEL_STD: [58.395, 57.120, 57.375]
+INPUT:
+  MIN_SIZE_TRAIN: (480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800)
+  MIN_SIZE_TEST: 800
+  FORMAT: "RGB"
+  MASK_FORMAT: 'bitmask'
+DATASETS:
+  TRAIN: ('coco20k_pseudo', )
+  TEST: ()
+DATALOADER:
+  NUM_WORKERS: 4
+TEST:
+  EVAL_PERIOD: 5000
+  PRECISE_BN:
+    ENABLED: True
+SOLVER:
+  STEPS: (18000, 20000)
+  MAX_ITER: 22000 #24k -> over fitted !!!! 
+  WARMUP_ITERS: 100 # Maybe needs tuning.
+  IMS_PER_BATCH: 16
+  BASE_LR: 0.02 # Maybe it will need some tuning. MoCo used 0.02.
+OUTPUT_DIR: "/data_ssd/monet/result/dino_0.8_0.8_30_22k_0.02"
